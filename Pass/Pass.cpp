@@ -1,133 +1,156 @@
 #include "Pass.h"
+#include "llvm/IR/Instructions.h"
+#include "llvm/IR/BasicBlock.h"
+#include "llvm/IR/Constants.h"
+#include "llvm/IR/Module.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include <cstdlib>
+#include <ctime>
 
 using namespace llvm;
 
-CreatedBlock FetchBlock(std::vector<CreatedBlock> haystack, BasicBlock* needle){
-    for(auto& element : haystack){
-        if(needle == std::get<0>(element)) return element;
+// ---------------------------------------------------------------------------
+// 辅助函数实现
+// ---------------------------------------------------------------------------
+
+CreatedBlock FetchBlock(std::vector<CreatedBlock> &haystack, BasicBlock *needle) {
+    for (auto &it : haystack)
+        if (needle == std::get<0>(it))
+            return it;
+    return std::make_tuple(nullptr, nullptr, nullptr);
+}
+
+BasicBlock *getPrimordial(std::vector<CreatedBlock> &haystack, BasicBlock *needle) {
+    CreatedBlock fetched = FetchBlock(haystack, needle);
+    return std::get<2>(fetched);
+}
+
+void FixupPhiNodes(std::vector<PHINode*> &PHIList,
+                   std::vector<CreatedBlock> &CreatedBlocks) {
+    for (PHINode *node : PHIList) {
+        for (unsigned i = 0; i < node->getNumIncomingValues(); ++i) {
+            BasicBlock *incoming = node->getIncomingBlock(i);
+            for (BasicBlock *pred : predecessors(node->getParent())) {
+                if (getPrimordial(CreatedBlocks, pred) == incoming) {
+                    node->replaceIncomingBlockWith(incoming, pred);
+                }
+            }
+        }
     }
-    return std::make_tuple(nullptr,nullptr,nullptr);
 }
 
-BasicBlock* getPrimordial(std::vector<CreatedBlock> haystack, BasicBlock* needle){
-    CreatedBlock Fetched = FetchBlock(haystack,needle);
-    return std::get<2>(Fetched);
+void CreateNewSwitch(LLVMContext &ctx,
+                     AllocaInst *Var,
+                     BasicBlock *DispatcherBB,
+                     std::vector<CreatedBlock> &CreatedBlocks,
+                     std::vector<Instruction*> &InsList,
+                     Instruction *Terminator,
+                     ConstantInt *Cons) {
+    IRBuilder<> B(DispatcherBB);
+    LoadInst *Loaded = B.CreateLoad(Type::getInt32Ty(ctx), Var, "Var");
+    // 默认使用 DispatcherBB 自身作为 default
+    SwitchInst *Dispatcher = B.CreateSwitch(Loaded, DispatcherBB, InsList.size());
+
+    ConstantInt *Next = ConstantInt::get(Type::getInt32Ty(ctx), Cons->getZExtValue());
+
+    for (auto *InstPtr : InsList) {
+        BasicBlock *BB = InstPtr->getParent();
+        Dispatcher->addCase(Next, BB);
+
+        unsigned Ran = (unsigned)rand();
+        if (InstPtr != Terminator) {
+            uint64_t num = Next->getZExtValue() ^ Ran;
+            Next = ConstantInt::get(Type::getInt32Ty(ctx), num);
+            IRBuilder<> LB(BB->getTerminator());
+            Value *retVal = LB.CreateXor(
+                Loaded, ConstantInt::get(Type::getInt32Ty(ctx), Ran), "ret");
+            LB.CreateStore(retVal, Var);
+        }
+    }
 }
 
-void Obfuscate(Module& M){
+// ---------------------------------------------------------------------------
+// 主混淆逻辑
+// ---------------------------------------------------------------------------
+void Obfuscate(Module &M) {
+    srand((unsigned)time(NULL)); // 或 srand(0) 便于调试
 
-    srand((unsigned int)time(NULL));
+    for (auto &F : M) {
+        if (F.isDeclaration() || F.empty())
+            continue;
 
-    for(auto& F : M){
-        if(!F.size()) continue;
-
-        // List of created Basic blocks
+        outs() << "[+] Proceeding on function: " << F.getName() << "\n";
         std::vector<CreatedBlock> CreatedBlocks;
 
-        outs() << "[+] Proceeding on function :" << F.getName() << "\n";
-
-        // Creating the random local variable in the function's entry block
+        // entry 中创建变量
         auto it = F.getEntryBlock().getFirstInsertionPt();
-        AllocaInst* Caf = new AllocaInst(Type::getInt32Ty(F.getContext()),0,"VarPtr",&*it);
-        ConstantInt* Cons = ConstantInt::get(Type::getInt32Ty(F.getContext()),(unsigned int)rand());
-        StoreInst* Stored = new StoreInst(Cons,Caf,&*it);
+        IRBuilder<> entryB(&*it);
+        AllocaInst *Caf = entryB.CreateAlloca(Type::getInt32Ty(F.getContext()), 0, "VarPtr");
+        ConstantInt *Cons = ConstantInt::get(Type::getInt32Ty(F.getContext()), (unsigned)rand());
+        entryB.CreateStore(Cons, Caf);
 
-        for(auto& BB : F){
-            LLVMContext& FContext = F.getContext();
-            StoreInst* StoredLocal = nullptr;
+        for (auto &BB : F) {
+            LLVMContext &Ctx = F.getContext();
+            if (std::get<0>(FetchBlock(CreatedBlocks, &BB)))
+                continue;
 
-            // Discard Basic blocks created by the pass
-            if(std::get<0>(FetchBlock(CreatedBlocks,&BB))) continue;
-            Instruction* Terminator = BB.getTerminator();
+            Instruction *Terminator = BB.getTerminator();
+            StoreInst *StoredLocal = nullptr;
 
-            if(&BB != &F.getEntryBlock()){
-                Cons = ConstantInt::get(Type::getInt32Ty(FContext),(unsigned int)rand());
-                StoredLocal = new StoreInst(Cons,Caf,&*BB.getFirstInsertionPt());
+            if (&BB != &F.getEntryBlock()) {
+                IRBuilder<> BBBuilder(&*BB.getFirstInsertionPt());
+                Cons = ConstantInt::get(Type::getInt32Ty(Ctx), (unsigned)rand());
+                StoredLocal = BBBuilder.CreateStore(Cons, Caf);
             }
 
-            // Registering each intsruction
             std::vector<Instruction*> InsList;
             std::vector<PHINode*> PHIList;
 
-            for(auto& I : BB){
-                LLVMContext& BBContext = BB.getContext();
-
-                /* Discarded instructions:
-                    - Allocation of the random variable
-                    - Storage of the random variable
-                    - First storage of random variable
-                    - Any other storage of random variable
-                    - landing pads instruction
-                    - Phi nodes
-                */
-
-                if(&I == Caf || &I == Stored || &I == StoredLocal || isa<LandingPadInst>(&I)) continue;
-                else if(isa<PHINode>(&I)){
+            for (auto &I : BB) {
+                if (&I == Caf || isa<LandingPadInst>(&I))
+                    continue;
+                else if (isa<PHINode>(&I)) {
                     PHIList.push_back(cast<PHINode>(&I));
                     continue;
                 }
+                if (auto *SI = dyn_cast<StoreInst>(&I))
+                    if (SI->getPointerOperand() == Caf)
+                        continue;
                 InsList.push_back(&I);
             }
 
-            // Creating Dispacher basic block
-            BasicBlock* DispacherBB = BasicBlock::Create(FContext,"Dispacher",&F);
-            CreatedBlocks.push_back(std::make_tuple(DispacherBB,nullptr,&BB));
+            // 创建 dispatcher 基本块
+            BasicBlock *DispatcherBB = BasicBlock::Create(Ctx, "Dispatcher", &F);
+            CreatedBlocks.push_back(std::make_tuple(DispatcherBB, nullptr, &BB));
 
-            // Creating new basic blocks for each instructions
-            for(auto& InstructionPtr : InsList){
+            // 为每条指令生成新 block
+            for (auto *InstPtr : InsList) {
+                BasicBlock *NewBB = BasicBlock::Create(Ctx, "BB", &F);
+                IRBuilder<> NB(NewBB);
+                InstPtr->removeFromParent();
+                NB.Insert(InstPtr);
+                CreatedBlocks.push_back(std::make_tuple(NewBB, DispatcherBB, &BB));
 
-                BasicBlock* NewBB = BasicBlock::Create(FContext,"BB",&F);
-                IRBuilder<> NewBB_builder(NewBB);
-                InstructionPtr->removeFromParent();
-                NewBB_builder.Insert(InstructionPtr);
-                CreatedBlocks.push_back(std::make_tuple(NewBB,DispacherBB,&BB));
-
-                // JMP back to the dispacher once Basic Block is executed
-                if(InstructionPtr != Terminator){
-                    BranchInst* BackToDispacher = BranchInst::Create(DispacherBB,NewBB);
-                }
+                // 如果该指令不是 Terminator，添加跳转回 dispatcher
+                if (InstPtr != Terminator)
+                    BranchInst::Create(DispatcherBB, NewBB);
             }
-            // JMP from entry to dispacher
-            BranchInst* GoToDispacher = BranchInst::Create(DispacherBB,&BB);
 
-            // Creating switch
-            CreateNewSwitch(FContext,Caf,DispacherBB,CreatedBlocks,InsList,Terminator,Cons);
+            // 原 basic block 若无终止符，跳入 dispatcher
+            if (!BB.getTerminator())
+                BranchInst::Create(DispatcherBB, &BB);
 
-            // Resolving PHInodes
-            if(PHIList.size()) FixupPhiNodes(PHIList, CreatedBlocks);
+            // 创建 switch dispatcher
+            CreateNewSwitch(Ctx, Caf, DispatcherBB, CreatedBlocks, InsList, Terminator, Cons);
+
+            // 修复 PHI
+            if (!PHIList.empty())
+                FixupPhiNodes(PHIList, CreatedBlocks);
+
+            // 调试输出
+            outs() << "  [-] Obfuscated basic block: " << BB.getName() << " ("
+                   << InsList.size() << " instructions)\n";
         }
-        outs() << "Done!\n";
-    }
-}
-
-void FixupPhiNodes(std::vector<PHINode*> PHIList,std::vector<CreatedBlock> CreatedBlocks){
-    for(PHINode* node : PHIList){
-        for(int i = 0 ; i < node->getNumIncomingValues() ; i ++){
-            BasicBlock* Incoming = node->getIncomingBlock(i);
-            for(BasicBlock* BBPtr : predecessors(node->getParent())){
-                if(getPrimordial(CreatedBlocks,BBPtr) == Incoming){
-                    node->replaceIncomingBlockWith(Incoming,BBPtr);
-                }
-            }
-        }
-    }
-}
-
-void CreateNewSwitch(LLVMContext& ctx,AllocaInst* Var, BasicBlock* DispacherBB, std::vector<CreatedBlock> CreatedBlocks, std::vector<Instruction*> InsList,Instruction* Terminator, ConstantInt* Cons){
-    LoadInst* Loaded = new LoadInst(Type::getInt32Ty(ctx),Var,"Var",DispacherBB);
-    SwitchInst* Dispacher = SwitchInst::Create(Loaded,std::get<0>(CreatedBlocks.back()),InsList.size(),DispacherBB);
-    ConstantInt* Next = ConstantInt::get(Type::getInt32Ty(ctx),Cons->getZExtValue());
-
-    for(auto& InstructionPtr : InsList){
-        
-        Dispacher->addCase(Next,InstructionPtr->getParent());
-        unsigned int Ran = (unsigned int)rand();
-
-        if(InstructionPtr != Terminator){
-            uint64_t num = Next->getZExtValue() ^ Ran;
-            Next = ConstantInt::get(Type::getInt32Ty(ctx),num);
-            Value* ret = BinaryOperator::CreateXor(Loaded,ConstantInt::get(Type::getInt32Ty(ctx),Ran),"ret",InstructionPtr->getParent()->getTerminator());
-            StoreInst* StorePtr = new StoreInst(ret,Var,InstructionPtr->getParent()->getTerminator());
-        }
+        outs() << "[+] Done with function: " << F.getName() << "\n";
     }
 }
