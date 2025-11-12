@@ -1,3 +1,6 @@
+#ifndef OBFUSCATE_PASS_H
+#define OBFUSCATE_PASS_H
+
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
@@ -9,43 +12,55 @@
 
 using namespace llvm;
 
-  typedef std::tuple<BasicBlock*, BasicBlock*, BasicBlock*> CreatedBlock;
+// -------- 类型定义 --------
+using CreatedBlock = std::tuple<BasicBlock*, BasicBlock*, BasicBlock*>;
+// (NewBlock, DispatcherBlock, OriginalBlock)
 
-  void FixupPhiNodes(std::vector<PHINode*> PHIList, std::vector<CreatedBlock> CreatedBlocks);
+// -------- 函数声明 --------
+CreatedBlock FetchBlock(std::vector<CreatedBlock> &haystack, BasicBlock *needle);
+BasicBlock* getPrimordial(std::vector<CreatedBlock> &haystack, BasicBlock *needle);
 
-  void CreateNewSwitch(LLVMContext& ctx,AllocaInst* Var, BasicBlock* DispacherBB, std::vector<CreatedBlock> CreatedBlocks, std::vector<Instruction*> InsList, Instruction* Terminator, ConstantInt* Cons);
+void FixupPhiNodes(std::vector<PHINode*> &PHIList,
+                   std::vector<CreatedBlock> &CreatedBlocks);
 
-  void Obfuscate(Module& M);
+void CreateNewSwitch(LLVMContext &ctx,
+                     AllocaInst *Var,
+                     BasicBlock *DispatcherBB,
+                     std::vector<CreatedBlock> &CreatedBlocks,
+                     std::vector<Instruction*> &InsList,
+                     Instruction *Terminator,
+                     ConstantInt *Cons);
 
-  CreatedBlock FetchBlock(std::vector<CreatedBlock> haystack, BasicBlock* needle);
+void Obfuscate(Module &M);
 
-  BasicBlock* getPrimordial(std::vector<CreatedBlock> haystack, BasicBlock* needle);
+// -------- Pass 实现 --------
+struct PassTheFishe : PassInfoMixin<PassTheFishe> {
+    PreservedAnalyses run(Module &M, ModuleAnalysisManager &) {
+        Obfuscate(M);
+        return PreservedAnalyses::none(); // 我们确实修改了 IR
+    }
+};
 
-    // Pass implementation
-    struct PassTheFishe : PassInfoMixin<PassTheFishe>{
-        PreservedAnalyses run(Module& M, ModuleAnalysisManager &){
-            Obfuscate(M);
-            return PreservedAnalyses::all();
-        }
-    };
-
-// Pass registration
+// -------- Pass 注册 --------
 llvm::PassPluginLibraryInfo FishePluginInfo() {
-  return {LLVM_PLUGIN_API_VERSION, "PassTheFishe", LLVM_VERSION_STRING,
-          [](PassBuilder &PB) {
+    return {
+        LLVM_PLUGIN_API_VERSION, "PassTheFishe", LLVM_VERSION_STRING,
+        [](PassBuilder &PB) {
             PB.registerPipelineParsingCallback(
                 [](StringRef Name, ModulePassManager &MPM,
                    ArrayRef<PassBuilder::PipelineElement>) {
-                  if (Name == "Pass-Fishe") {
-                    MPM.addPass(PassTheFishe());
-                    return true;
-                  }
-                  return false;
+                    if (Name == "Pass-Fishe") {
+                        MPM.addPass(PassTheFishe());
+                        return true;
+                    }
+                    return false;
                 });
-          }};
+        }};
 }
 
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo() {
-  return FishePluginInfo();
+    return FishePluginInfo();
 }
+
+#endif
