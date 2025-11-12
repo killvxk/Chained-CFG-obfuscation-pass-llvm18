@@ -1,28 +1,103 @@
-# Chained-CFG-obfuscation-pass
-LLVM obfuscation out-of-tree pass, flattening at the basic block's level and turning each basic block into a dispacher and each instruction into a new basic block.
+---
 
-## Pass description
-This CFG flattening pass is applied at the scope of the basic block which means that even programs with few basic blocks will be obfuscated. The larger the size of the basic blocks, the better the obfuscation will be. This is why this pass can be pretty effective combined with some MBA operation : they can potentially increase the size of each basic block and therefore the number of case in the basic block's dispacher. To find the right way the dispacher is going to use a local variable for each function with a random value and calculate the next case's value.
+# 🌀 LLVM Pass - Fishe Control Flow Obfuscation
 
-* On the left we can see the main function of a non obfuscated binary.
-* On the right the same function but obfuscated with chained CFG flattening.
+本项目实现了一个基于 LLVM Pass 的 **控制流混淆 (Control Flow Flattening)** 插件，
+代号 **Fishe**。它通过在函数间插入调度块（dispatcher block）以及随机的不可达假块，
+扰乱控制流结构，从而增加反编译难度。
 
-![screenshot](./screenshots/Image.png)
+---
 
-The raw size of the file is not much larger (in this case 20 % larger) but the graph is drastically different with much more basic bloc which symbolize a single program's instruction, the other part of the basic block is a xor operation on the local variable used by the dispacher to dinamically find his path in this giant mess.
+## 🧩 功能特点
 
-## Build this pass
-* You first need to get LLVM working by either using your 5 Tb of RAM to build it from the sources or simply install it with ```apt install clang build-essential llvm-12-dev```.
-* We'll use cmake to build a makefile for the pass so you can modify the ```Pass/CMakelists.txt``` with your own LLVM installation/includes directories.
-* You can then emit the LLVM IR from the source code you want with ```clang -O0 -S -emit-llvm input.c -o output.ll```.
-* build the pass with ```cmake <your CMakeLists.txt file location>``` and ```make```.
-* run the pass with ```path/to/llvm/bin/opt -load-pass-plugin /build/folder/libPassTheFishe.so -passes=Pass-Fishe -O0 output.ll -o output_mod.ll```.
-* You can now recompile your LLVM IR.
-* Note that if you want to use the legacy pass manager you will need to change the pass implementation and registration in the ```Pass/Pass.h``` file check this [link](https://llvm.org/docs/WritingAnLLVMPass.html) to see how the legacy PM works.
+- ✅ **控制流扁平化**：使用 switch 控制调度执行顺序；
+- ✅ **随机伪造 case**：为每个调度器注入若干不可达块 (`unreachable`)；
+- ✅ **命令行可配置强度**：可通过选项 `-fishe-fake=N` 控制假块数量；
+- ✅ **LLVM 18 可编译通过**，`opt -verify` 不会报错；
+- 🧠 适用于 IR 层面的混淆实验或教学研究。
 
-## What to do next?
-* This CFG flattening is an intra-basic block obfuscation thus merging this pass with CFG flattening on other levels would be really fun/hard to deobfuscate:
-    + At the function level(inter-basic block)
-    + At the module level (inter-function)
-    + At the OS level (inter-process) lmao
-* As previously said, combining this pass with MBA operation could also increase reverser's pain.
+---
+
+## ⚙️ 构建
+
+> 需要 LLVM 18 的开发头文件与 `llvm-config`。
+
+```bash
+clang++ -fPIC -shared Pass.cpp -o libPassFishe.so \
+  `llvm-config --cxxflags --ldflags --system-libs --libs core passes`
+```
+
+---
+
+## 🚀 使用
+
+### 1. 运行 Pass
+```bash
+opt -load-pass-plugin=./libPassFishe.so -passes="Pass-Fishe" input.ll -o output.ll
+```
+
+### 2. 可选参数
+| 参数 | 默认值 | 作用 |
+|------|---------|------|
+| `-fishe-fake=N` | `3` | 为每个函数 dispatcher 生成 N 个假 (unreachable) 块，用于增强混淆强度 |
+
+示例：
+
+```bash
+opt -load-pass-plugin=./libPassFishe.so -passes="Pass-Fishe" -fishe-fake=5 input.ll -o output.ll
+```
+
+---
+
+## 📁 混淆效果
+
+经过处理后的 IR 将包含：
+- 一个或多个 **调度块 (dispatcher block)**；
+- 真正的逻辑块（对应原函数体的语句）；
+- 多个 **假块 (`fake_x`)**：
+
+```llvm
+switch i32 %var, label %fake_0 [
+  i32 100 -> label %BB.1
+  i32 200 -> label %BB.2
+  i32 9999 -> label %fake_1
+  i32 8888 -> label %fake_2
+]
+
+fake_0:
+  %noise = add i32 13, 13
+  unreachable
+
+fake_1:
+  unreachable
+fake_2:
+  %trash = add i32 5, 5
+  unreachable
+```
+
+这些 `fake_*` 块不会被实际执行，
+但会让静态分析与反编译看到更复杂的控制流。
+
+---
+
+## 🧰 开发说明
+
+- Pass 名称：`Pass-Fishe`
+- 命名空间：匿名（位于 `registerStandardPasses`）。
+- 命令行选项通过 `llvm::cl::opt` 定义（`-fishe-fake`）。
+
+### 修改入口
+所有核心逻辑位于：
+```cpp
+CreateNewSwitch(...)
+```
+其中根据 `FisheFakeCount` 参数生成对应数量的随机假块。
+
+---
+
+## ⚖️ 注意事项
+
+> 本项目仅用于学习 LLVM Pass 开发与混淆技术研究，
+> **请勿将其用于任何违反法律或软件许可协议的用途。**
+
+---
