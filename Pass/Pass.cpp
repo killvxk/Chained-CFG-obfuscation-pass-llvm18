@@ -6,8 +6,13 @@
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include <cstdlib>
 #include <ctime>
-
+#include "llvm/Support/CommandLine.h"
 using namespace llvm;
+// 可在命令行设置：-fishe-fake=N
+static cl::opt<unsigned> FisheFakeCount(
+    "fishe-fake",
+    cl::desc("Number of fake unreachable blocks for Fishe obfuscation"),
+    cl::init(3));   // 默认 3 个
 
 // ---------------------------------------------------------------------------
 // 辅助函数实现
@@ -81,7 +86,7 @@ void CreateNewSwitch(LLVMContext &ctx,
     LoadInst *Loaded = B.CreateLoad(Type::getInt32Ty(ctx), Var, "Var");
 
     // -------- 1️⃣  生成若干 fake 块 --------
-    unsigned FakeCount = 2 + rand() % 3; // 2~4 个假块
+    unsigned FakeCount = FisheFakeCount;
     std::vector<BasicBlock*> FakeBlocks;
     for (unsigned i = 0; i < FakeCount; ++i) {
         BasicBlock *FakeBB = BasicBlock::Create(ctx, "fake_" + Twine(i), DispatcherBB->getParent());
