@@ -38,7 +38,7 @@ void FixupPhiNodes(std::vector<PHINode*> &PHIList,
         }
     }
 }
-
+#if 0
 void CreateNewSwitch(LLVMContext &ctx,
                      AllocaInst *Var,
                      BasicBlock *DispatcherBB,
@@ -68,6 +68,59 @@ void CreateNewSwitch(LLVMContext &ctx,
         }
     }
 }
+#endif
+
+void CreateNewSwitch(LLVMContext &ctx,
+                     AllocaInst *Var,
+                     BasicBlock *DispatcherBB,
+                     std::vector<CreatedBlock> &CreatedBlocks,
+                     std::vector<Instruction*> &InsList,
+                     Instruction *Terminator,
+                     ConstantInt *Cons) {
+    IRBuilder<> B(DispatcherBB);
+    LoadInst *Loaded = B.CreateLoad(Type::getInt32Ty(ctx), Var, "Var");
+
+    // -------- 1️⃣  生成若干 fake 块 --------
+    unsigned FakeCount = 2 + rand() % 3; // 2~4 个假块
+    std::vector<BasicBlock*> FakeBlocks;
+    for (unsigned i = 0; i < FakeCount; ++i) {
+        BasicBlock *FakeBB = BasicBlock::Create(ctx, "fake_" + Twine(i), DispatcherBB->getParent());
+        IRBuilder<> FB(FakeBB);
+        // 可额外制造一点“样子”：
+        ConstantInt *Rnd = ConstantInt::get(Type::getInt32Ty(ctx), rand());
+        FB.CreateAdd(Rnd, Rnd, "noise");  // 无副作用伪指令
+        FB.CreateUnreachable();
+        FakeBlocks.push_back(FakeBB);
+    }
+
+    // 默认指向第一个假块（始终存在）
+    SwitchInst *Dispatcher =
+        B.CreateSwitch(Loaded, FakeBlocks.front(), InsList.size() + FakeCount);
+
+    ConstantInt *Next = ConstantInt::get(Type::getInt32Ty(ctx), Cons->getZExtValue());
+
+    // -------- 2️⃣  添加真实 case --------
+    for (auto *InstPtr : InsList) {
+        BasicBlock *BB = InstPtr->getParent();
+        Dispatcher->addCase(Next, BB);
+
+        unsigned Ran = (unsigned)rand();
+        if (InstPtr != Terminator) {
+            uint64_t num = Next->getZExtValue() ^ Ran;
+            Next = ConstantInt::get(Type::getInt32Ty(ctx), num);
+            IRBuilder<> LB(BB->getTerminator());
+            Value *retVal = LB.CreateXor(
+                Loaded, ConstantInt::get(Type::getInt32Ty(ctx), Ran), "ret");
+            LB.CreateStore(retVal, Var);
+        }
+    }
+
+    // -------- 3️⃣  额外添加伪 case --------
+    for (auto *FB : FakeBlocks) {
+        Dispatcher->addCase(ConstantInt::get(Type::getInt32Ty(ctx), rand()), FB);
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // 主混淆逻辑
